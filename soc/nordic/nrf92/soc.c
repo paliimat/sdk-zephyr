@@ -10,10 +10,20 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#ifdef CONFIG_LOG_FRONTEND_STMESP
+#include <zephyr/logging/log_frontend_stmesp.h>
+#endif
+
+#include <hal/nrf_gpio.h>
 #include <hal/nrf_hsfll.h>
 #include <hal/nrf_lrcconf.h>
 #include <hal/nrf_spu.h>
+#include <hal/nrf_memconf.h>
 #include <soc/nrfx_coredep.h>
+#include <soc_lrcconf.h>
+#include <dmm.h>
+#include <uicr/uicr.h>
+
 
 LOG_MODULE_REGISTER(soc, CONFIG_SOC_LOG_LEVEL);
 
@@ -22,6 +32,17 @@ LOG_MODULE_REGISTER(soc, CONFIG_SOC_LOG_LEVEL);
 #elif defined(NRF_RADIOCORE)
 #define HSFLL_NODE DT_NODELABEL(cpurad_hsfll)
 #endif
+
+#ifdef CONFIG_USE_DT_CODE_PARTITION
+#define FLASH_LOAD_OFFSET DT_REG_ADDR(DT_CHOSEN(zephyr_code_partition))
+#elif defined(CONFIG_FLASH_LOAD_OFFSET)
+#define FLASH_LOAD_OFFSET CONFIG_FLASH_LOAD_OFFSET
+#endif
+
+#define PARTITION_IS_RUNNING_APP_PARTITION(label)                                                  \
+	(DT_REG_ADDR(DT_NODELABEL(label)) == FLASH_LOAD_OFFSET)
+
+sys_snode_t soc_node;
 
 #define FICR_ADDR_GET(node_id, name)                                           \
 	DT_REG_ADDR(DT_PHANDLE_BY_NAME(node_id, nordic_ficrs, name)) +         \
@@ -46,11 +67,31 @@ static void power_domain_init(void)
 	 *  WFI the power domain will be correctly retained.
 	 */
 
-	nrf_lrcconf_poweron_force_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_MAIN, true);
-	nrf_lrcconf_poweron_force_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_DOMAIN_0, true);
+	soc_lrcconf_poweron_request(&soc_node, NRF_LRCCONF_POWER_DOMAIN_0);
+	nrf_lrcconf_poweron_force_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_MAIN, false);
 
-	nrf_lrcconf_retain_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_MAIN, true);
-	nrf_lrcconf_retain_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_DOMAIN_0, true);
+	nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET_BIT_ICACHE, false);
+	nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET_BIT_DCACHE, false);
+	nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET_BIT_ICACHE, false);
+	nrf_memconf_ramblock_ret_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET_BIT_DCACHE, false);
+#if defined(RAMBLOCK_RET2_BIT_ICACHE)
+	nrf_memconf_ramblock_ret2_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET2_BIT_ICACHE, false);
+	nrf_memconf_ramblock_ret2_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET2_BIT_ICACHE, false);
+#endif
+#if defined(RAMBLOCK_RET2_BIT_DCACHE)
+	nrf_memconf_ramblock_ret2_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET2_BIT_DCACHE, false);
+	nrf_memconf_ramblock_ret2_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET2_BIT_DCACHE, false);
+#endif
+	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET_MASK, true);
+	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET_MASK, true);
+#if defined(RAMBLOCK_RET2_MASK)
+	/*
+	 * TODO: Use nrf_memconf_ramblock_ret2_mask_enable_set() function
+	 * when will be provided by HAL.
+	 */
+	NRF_MEMCONF->POWER[0].RET2 = RAMBLOCK_RET2_MASK;
+	NRF_MEMCONF->POWER[1].RET2 = RAMBLOCK_RET2_MASK;
+#endif
 }
 
 static int trim_hsfll(void)
@@ -74,6 +115,8 @@ static int trim_hsfll(void)
 	nrf_hsfll_trim_set(hsfll, &trim);
 
 	nrf_hsfll_task_trigger(hsfll, NRF_HSFLL_TASK_FREQ_CHANGE);
+	/* HSFLL task frequency change needs to be triggered twice to take effect.*/
+	nrf_hsfll_task_trigger(hsfll, NRF_HSFLL_TASK_FREQ_CHANGE);
 
 	LOG_DBG("NRF_HSFLL->TRIM.VSUP = %d", hsfll->TRIM.VSUP);
 	LOG_DBG("NRF_HSFLL->TRIM.COARSE = %d", hsfll->TRIM.COARSE);
@@ -84,14 +127,29 @@ static int trim_hsfll(void)
 	return 0;
 }
 
+#if defined(CONFIG_ARM_ON_ENTER_CPU_IDLE_HOOK)
+bool z_arm_on_enter_cpu_idle(void)
+{
+#ifdef CONFIG_LOG_FRONTEND_STMESP
+	log_frontend_stmesp_pre_sleep();
+#endif
+	return true;
+}
+#endif
+
 void soc_early_init_hook(void)
 {
+	int err;
+
 	sys_cache_instr_enable();
 	sys_cache_data_enable();
 
 	power_domain_init();
 
 	trim_hsfll();
+
+	err = dmm_init();
+	__ASSERT_NO_MSG(err == 0);
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(ccm030))
 	/* DMASEC is set to non-secure by default, which prevents CCM from

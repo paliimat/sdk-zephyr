@@ -12,12 +12,58 @@
 #include <hal/nrf_memconf.h>
 #include <hal/nrf_cache.h>
 #include <zephyr/cache.h>
-#include <power.h>
+#include <haltium_power.h>
 #include <soc_lrcconf.h>
-#include "soc.h"
-#include "pm_s2ram.h"
+#include <soc.h>
+#include "haltium_pm_s2ram.h"
 
-extern sys_snode_t soc_node;
+static sys_snode_t soc_node;
+
+static void nrf_soc_memconf_retain_set(bool enable)
+{
+	uint32_t ret_mask = BIT(RAMBLOCK_RET_BIT_ICACHE) | BIT(RAMBLOCK_RET_BIT_DCACHE);
+
+	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 0, ret_mask, enable);
+	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 1, ret_mask, enable);
+
+#if defined(RAMBLOCK_RET2_MASK)
+	ret_mask = 0;
+#if defined(RAMBLOCK_RET2_BIT_ICACHE)
+	ret_mask |= BIT(RAMBLOCK_RET2_BIT_ICACHE);
+#endif
+#if defined(RAMBLOCK_RET2_BIT_DCACHE)
+	ret_mask |= BIT(RAMBLOCK_RET2_BIT_DCACHE);
+#endif
+	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 0, ret_mask, enable);
+	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 1, ret_mask, enable);
+#endif /* defined(RAMBLOCK_RET2_MASK) */
+}
+
+void power_domain_init(void)
+{
+	/*
+	 * Set:
+	 *  - LRCCONF010.POWERON.MAIN: 1
+	 *  - LRCCONF010.POWERON.ACT: 1
+	 *  - LRCCONF010.RETAIN.MAIN: 1
+	 *  - LRCCONF010.RETAIN.ACT: 1
+	 *
+	 *  This is done here at boot so that when the idle routine will hit
+	 *  WFI the power domain will be correctly retained.
+	 */
+
+	soc_lrcconf_poweron_request(&soc_node, NRF_LRCCONF_POWER_DOMAIN_0);
+	nrf_lrcconf_poweron_force_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_MAIN, false);
+	nrf_soc_memconf_retain_set(false);
+	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET_MASK, true);
+	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET_MASK, true);
+#if defined(RAMBLOCK_RET2_MASK)
+	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET2_MASK, true);
+	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET2_MASK, true);
+#endif
+}
+
+#if defined(CONFIG_PM) || defined(CONFIG_POWEROFF)
 
 static void nrf_power_down_cache(void)
 {
@@ -244,3 +290,5 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 {
 	irq_unlock(0);
 }
+
+#endif /* defined(CONFIG_PM) || defined(CONFIG_POWEROFF) */

@@ -14,7 +14,6 @@
 #include <zephyr/logging/log_frontend_stmesp.h>
 #endif
 
-#include <hal/nrf_gpio.h>
 #include <hal/nrf_hsfll.h>
 #include <hal/nrf_lrcconf.h>
 #include <hal/nrf_spu.h>
@@ -22,6 +21,7 @@
 #include <hal/nrf_nfct.h>
 #include <lib/nrfx_coredep.h>
 #include <soc_lrcconf.h>
+#include <haltium_power.h>
 #include <dmm.h>
 
 #if defined(CONFIG_SOC_NRF54H20_CPURAD_ENABLE)
@@ -58,8 +58,6 @@ LOG_MODULE_REGISTER(soc, CONFIG_SOC_LOG_LEVEL);
 	(DT_REG_ADDR(DT_NODELABEL(label)) <= FLASH_LOAD_OFFSET &&                                  \
 	 DT_REG_ADDR(DT_NODELABEL(label)) + DT_REG_SIZE(DT_NODELABEL(label)) > FLASH_LOAD_OFFSET)
 
-sys_snode_t soc_node;
-
 #define FICR_ADDR_GET(node_id, name)                                           \
 	DT_REG_ADDR(DT_PHANDLE_BY_NAME(node_id, nordic_ficrs, name)) +         \
 		DT_PHA_BY_NAME(node_id, nordic_ficrs, name, offset)
@@ -70,49 +68,6 @@ sys_snode_t soc_node;
 				      ADDRESS_DOMAIN_Msk |                     \
 				      ADDRESS_BUS_Msk)))
 
-void nrf_soc_memconf_retain_set(bool enable)
-{
-	uint32_t ret_mask = BIT(RAMBLOCK_RET_BIT_ICACHE) | BIT(RAMBLOCK_RET_BIT_DCACHE);
-
-	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 0, ret_mask, enable);
-	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 1, ret_mask, enable);
-
-#if defined(RAMBLOCK_RET2_MASK)
-	ret_mask = 0;
-#if defined(RAMBLOCK_RET2_BIT_ICACHE)
-	ret_mask |= BIT(RAMBLOCK_RET2_BIT_ICACHE);
-#endif
-#if defined(RAMBLOCK_RET2_BIT_DCACHE)
-	ret_mask |= BIT(RAMBLOCK_RET2_BIT_DCACHE);
-#endif
-	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 0, ret_mask, enable);
-	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 1, ret_mask, enable);
-#endif /* defined(RAMBLOCK_RET2_MASK) */
-}
-
-static void power_domain_init(void)
-{
-	/*
-	 * Set:
-	 *  - LRCCONF010.POWERON.MAIN: 1
-	 *  - LRCCONF010.POWERON.ACT: 1
-	 *  - LRCCONF010.RETAIN.MAIN: 1
-	 *  - LRCCONF010.RETAIN.ACT: 1
-	 *
-	 *  This is done here at boot so that when the idle routine will hit
-	 *  WFI the power domain will be correctly retained.
-	 */
-
-	soc_lrcconf_poweron_request(&soc_node, NRF_LRCCONF_POWER_DOMAIN_0);
-	nrf_lrcconf_poweron_force_set(NRF_LRCCONF010, NRF_LRCCONF_POWER_MAIN, false);
-	nrf_soc_memconf_retain_set(false);
-	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET_MASK, true);
-	nrf_memconf_ramblock_ret_mask_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET_MASK, true);
-#if defined(RAMBLOCK_RET2_MASK)
-	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 0, RAMBLOCK_RET2_MASK, true);
-	nrf_memconf_ramblock_ret2_mask_enable_set(NRF_MEMCONF, 1, RAMBLOCK_RET2_MASK, true);
-#endif
-}
 
 static int trim_hsfll(void)
 {
@@ -186,17 +141,6 @@ void soc_early_init_hook(void)
 	     DT_NODE_HAS_STATUS(DT_NODELABEL(nfct), reserved)) &&
 	    DT_PROP_OR(DT_NODELABEL(nfct), nfct_pins_as_gpios, 0)) {
 		nrf_nfct_pad_config_enable_set(NRF_NFCT, false);
-	}
-
-	/* This is a workaround for not yet having upstream patches for properly handling
-	 * pin retention. It should be removed as part of the next upmerge.
-	 */
-	if (IS_ENABLED(CONFIG_SOC_NRF54H20_DISABLE_ALL_GPIO_RETENTION_WORKAROUND)) {
-		NRF_GPIO_Type *gpio_regs[GPIO_COUNT] = GPIO_REG_LIST;
-
-		for (int i = 0; i < NRFX_ARRAY_SIZE(gpio_regs); i++) {
-			nrf_gpio_port_retain_set(gpio_regs[i], 0);
-		}
 	}
 }
 
